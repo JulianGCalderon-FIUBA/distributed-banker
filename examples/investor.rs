@@ -1,8 +1,10 @@
 use std::error::Error;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufReader, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 use std::{env, thread};
+
+use distributed_banker::read_usize;
 
 pub fn parse_arguments() -> Result<SocketAddr, Box<dyn Error>> {
     let mut args = env::args();
@@ -16,66 +18,52 @@ pub fn parse_arguments() -> Result<SocketAddr, Box<dyn Error>> {
 }
 
 fn main() {
-    let addr = match parse_arguments() {
-        Ok(addr) => addr,
-        Err(error) => {
-            eprintln!("Could not parse arguments: {}", error);
-            return;
-        }
-    };
+    let addr = parse_arguments().expect("Could not parse arguments");
 
-    let banker = match TcpStream::connect(addr) {
-        Ok(listener) => listener,
-        Err(error) => {
-            eprintln!("Could not connect to banker: {}", error);
-            return;
-        }
-    };
+    let banker = TcpStream::connect(addr).expect("Could not connect to banker");
 
-    invest(banker);
+    let investor = Investor::new(banker).expect("Could not create investor");
+
+    investor.invest()
 }
 
-fn invest(mut write_banker: TcpStream) {
-    let read_banker = match write_banker.try_clone() {
-        Ok(read_banker) => read_banker,
-        Err(error) => {
-            eprintln!("Could not clone banker read stream: {}", error);
-            return;
-        }
-    };
+struct Investor {
+    banker: TcpStream,
+    reader: BufReader<TcpStream>,
+}
 
-    let mut reader = BufReader::new(read_banker);
+impl Investor {
+    pub fn new(banker: TcpStream) -> io::Result<Self> {
+        let read_banker = banker.try_clone()?;
+        let reader = BufReader::new(read_banker);
 
-    loop {
-        let mut message = String::new();
-        if let Err(error) = reader.read_line(&mut message) {
-            eprintln!("Could not receive money from banker: {}", error);
-            return;
-        }
+        Ok(Self { banker, reader })
+    }
 
-        if let Some(b'\n') = message.bytes().last() {
-            message.pop();
-        }
+    fn invest(mut self) {
+        loop {
+            let money = match read_usize(&mut self.reader) {
+                Ok(money) => money,
+                Err(error) => {
+                    eprintln!("Could not parse money from banker: {}", error);
+                    return;
+                }
+            };
 
-        let money = match message.parse::<usize>() {
-            Ok(money) => money,
-            Err(error) => {
-                eprintln!("Could not parse money from banker: {}", error);
+            let money = self.invest_money(money);
+
+            thread::sleep(Duration::from_secs(1));
+
+            if let Err(error) = writeln!(&mut self.banker, "{}", money) {
+                eprintln!("Could not send money to banker: {}", error);
                 return;
             }
-        };
-
-        let money = (money as isize) + calculate_gain(money);
-
-        thread::sleep(Duration::from_secs(1));
-
-        if let Err(error) = writeln!(&mut write_banker, "{}", money) {
-            eprintln!("Could not send money to banker: {}", error);
-            return;
         }
     }
-}
 
-fn calculate_gain(_money: usize) -> isize {
-    return (rand::random::<usize>() % 200) as isize - 100;
+    fn invest_money(&self, money: usize) -> usize {
+        let ratio = rand::random::<f64>() * 0.2 + 0.92;
+
+        return (money as f64 * ratio) as usize;
+    }
 }

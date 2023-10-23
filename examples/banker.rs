@@ -1,8 +1,11 @@
 use std::error::Error;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::{Arc, Barrier};
 use std::{env, thread};
+
+use distributed_banker::read_usize;
 
 pub fn parse_arguments() -> Result<(SocketAddr, usize), Box<dyn Error>> {
     let mut args = env::args();
@@ -21,21 +24,9 @@ pub fn parse_arguments() -> Result<(SocketAddr, usize), Box<dyn Error>> {
 }
 
 fn main() {
-    let (addr, investors) = match parse_arguments() {
-        Ok((addr, investors)) => (addr, investors),
-        Err(error) => {
-            eprintln!("Could not parse arguments: {}", error);
-            return;
-        }
-    };
+    let (addr, investors) = parse_arguments().expect("Could not parse arguments");
 
-    let listener = match TcpListener::bind(addr) {
-        Ok(listener) => listener,
-        Err(error) => {
-            eprintln!("Could not bind to address: {}", error);
-            return;
-        }
-    };
+    let listener = TcpListener::bind(addr).expect("Could not bind to address");
 
     let banker = Arc::new(Banker::new(investors + 1, 1000));
 
@@ -45,30 +36,16 @@ fn main() {
     handles.push(thread::spawn(|| log(banker_clone)));
 
     for client in listener.incoming() {
-        let client = match client {
-            Ok(client) => client,
-            Err(err) => {
-                eprintln!("Could not accept connection: {}", err);
-                continue;
-            }
-        };
+        let client = client.expect("Could not accept connection");
 
-        let handler = match Handler::new(&banker, client) {
-            Ok(handler) => handler,
-            Err(error) => {
-                eprintln!("Could not create handler: {}", error);
-                continue;
-            }
-        };
+        let handler = Handler::new(&banker, client).expect("Chould not create handler");
 
         let handle = thread::spawn(|| handler.handle());
         handles.push(handle);
     }
 
     for handle in handles {
-        if let Err(error) = handle.join() {
-            eprintln!("Could not join thread: {:?}", error)
-        }
+        handle.join().expect("Could not join handle");
     }
 }
 
@@ -76,14 +53,36 @@ struct Banker {
     read_barrier: Barrier,
     write_barrier: Barrier,
     investors: usize,
-    money: Mutex<usize>,
+    money: AtomicIsize,
 }
 
 impl Banker {
-    fn new(investors: usize, initial: usize) -> Self {
+    fn wait_read(&self) {
+        self.read_barrier.wait();
+    }
+
+    fn wait_write(&self) {
+        self.write_barrier.wait();
+    }
+
+    fn sub(&self, amount: usize) {
+        self.money.fetch_sub(amount as isize, Ordering::Relaxed);
+    }
+
+    fn add(&self, amount: usize) {
+        self.money.fetch_add(amount as isize, Ordering::Relaxed);
+    }
+
+    fn money(&self) -> isize {
+        self.money.load(Ordering::Relaxed)
+    }
+}
+
+impl Banker {
+    fn new(investors: usize, initial: isize) -> Self {
         let read_barrier = Barrier::new(investors);
         let write_barrier = Barrier::new(investors);
-        let money = Mutex::new(initial);
+        let money = AtomicIsize::new(initial);
 
         return Self {
             read_barrier,
@@ -116,56 +115,44 @@ impl Handler {
 
     pub fn handle(mut self) {
         loop {
-            self.banker.read_barrier.wait();
-
-            let money = *self.banker.money.lock().expect("Should never be poisoned");
-            let share = money / self.banker.investors;
-
-            if let Err(error) = writeln!(&mut self.client, "{}", share) {
+            if let Err(error) = self.send_share() {
                 eprintln!("Could not send money to client: {}", error);
-                return;
             }
 
-            self.banker.write_barrier.wait();
-
-            *self.banker.money.lock().expect("Should never be poisoned") -= share;
-
-            let mut message = String::new();
-            if let Err(error) = self.reader.read_line(&mut message) {
-                eprintln!("Could not receive money from client: {}", error);
-                return;
-            }
-
-            if let Some(b'\n') = message.bytes().last() {
-                message.pop();
-            }
-
-            {
-                let mut money = self
-                    .banker
-                    .money
-                    .lock()
-                    .expect("Lock should never be poisoned");
-
-                match message.parse::<isize>() {
-                    Ok(gain) => *money = money.saturating_add_signed(gain),
-                    Err(error) => {
-                        eprintln!("Could not parse moeny from client: {}", error);
-                        return;
-                    }
-                };
-            }
+            match read_usize(&mut self.reader) {
+                Ok(result) => {
+                    self.banker.add(result);
+                }
+                Err(error) => {
+                    eprintln!("Could not receive money from client: {}", error);
+                    return;
+                }
+            };
         }
+    }
+
+    fn send_share(&mut self) -> io::Result<()> {
+        self.banker.wait_read();
+
+        let money = self.banker.money() as usize;
+        let share = money / self.banker.investors;
+
+        writeln!(&mut self.client, "{}", share)?;
+
+        self.banker.wait_write();
+
+        self.banker.sub(share);
+
+        Ok(())
     }
 }
 
 fn log(banker: Arc<Banker>) {
     loop {
-        banker.read_barrier.wait();
+        banker.wait_read();
 
-        let money = *banker.money.lock().expect("Should never be poisoned");
-        println!("Starting Week with: {}", money);
+        println!("Starting Week with: {}", banker.money());
 
-        banker.write_barrier.wait();
+        banker.wait_write();
     }
 }

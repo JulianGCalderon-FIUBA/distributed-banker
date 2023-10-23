@@ -1,7 +1,9 @@
+use shared_child::SharedChild;
 use std::env;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::process::Command;
+use std::sync::Arc;
 
 pub fn parse_arguments() -> Result<(SocketAddr, usize), Box<dyn Error>> {
     let mut args = env::args();
@@ -20,37 +22,37 @@ pub fn parse_arguments() -> Result<(SocketAddr, usize), Box<dyn Error>> {
 }
 
 fn main() {
-    let (addr, investors) = match parse_arguments() {
-        Ok((addr, investors)) => (addr, investors),
-        Err(error) => {
-            eprintln!("Could not parse arguments: {}", error);
-            return;
-        }
-    };
+    let (addr, investors) = parse_arguments().expect("Could not parse arguments");
 
     let mut childs = Vec::new();
 
     for _ in 0..investors {
-        let child = match Command::new("cargo")
-            .arg("run")
-            .args(["--example", "investor"])
-            .arg(addr.to_string())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(error) => {
-                eprintln!("Could not spawn investor: {}", error);
-                return;
-            }
-        };
+        let mut command = investor_command(addr);
 
-        childs.push(child);
+        let child = SharedChild::spawn(&mut command).expect("Could not spawn investor");
+
+        childs.push(Arc::new(child));
     }
 
-    for mut child in childs {
-        match child.wait() {
-            Ok(status) => println!("Child exited with status: {}", status),
-            Err(error) => eprintln!("Could not wait child: {}", error),
-        };
+    let childs_clone = childs.clone();
+    let _ = ctrlc::set_handler(move || {
+        for child in &childs_clone {
+            let _ = child.kill();
+        }
+    });
+
+    for child in &childs {
+        let _ = child.wait();
     }
+}
+
+fn investor_command(addr: SocketAddr) -> Command {
+    let mut command = Command::new("cargo");
+
+    command
+        .arg("run")
+        .args(["--example", "investor"])
+        .arg(addr.to_string());
+
+    command
 }
