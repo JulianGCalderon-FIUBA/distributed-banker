@@ -147,8 +147,8 @@ impl Handler {
                     .lock()
                     .expect("Lock should never be poisoned");
 
-                match message.parse::<usize>() {
-                    Ok(gain) => *money += gain,
+                match message.parse::<isize>() {
+                    Ok(gain) => *money = money.saturating_add_signed(gain),
                     Err(error) => {
                         eprintln!("Could not parse moeny from client: {}", error);
                         return;

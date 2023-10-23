@@ -57,7 +57,7 @@ fn invest(mut write_banker: TcpStream) {
             message.pop();
         }
 
-        let mut money = match message.parse::<usize>() {
+        let money = match message.parse::<usize>() {
             Ok(money) => money,
             Err(error) => {
                 eprintln!("Could not parse money from banker: {}", error);
@@ -65,7 +65,7 @@ fn invest(mut write_banker: TcpStream) {
             }
         };
 
-        money += 100;
+        let money = (money as isize) + calculate_gain(money);
 
         thread::sleep(Duration::from_secs(1));
 
@@ -74,4 +74,8 @@ fn invest(mut write_banker: TcpStream) {
             return;
         }
     }
+}
+
+fn calculate_gain(_money: usize) -> isize {
+    return (rand::random::<usize>() % 200) as isize - 100;
 }
