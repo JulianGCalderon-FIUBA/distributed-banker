@@ -1,8 +1,22 @@
+use std::error::Error;
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
+use std::time::Duration;
+use std::{env, thread};
+
+pub fn parse_arguments() -> Result<SocketAddr, Box<dyn Error>> {
+    let mut args = env::args();
+
+    let addr = args
+        .nth(1)
+        .ok_or("expected socket address as first argument")?
+        .parse()?;
+
+    return Ok(addr);
+}
 
 fn main() {
-    let addr = match distributed_banker::parse_arguments() {
+    let addr = match parse_arguments() {
         Ok(addr) => addr,
         Err(error) => {
             eprintln!("Could not parse arguments: {}", error);
@@ -52,6 +66,8 @@ fn invest(mut write_banker: TcpStream) {
         };
 
         money += 100;
+
+        thread::sleep(Duration::from_secs(1));
 
         if let Err(error) = writeln!(&mut write_banker, "{}", money) {
             eprintln!("Could not send money to banker: {}", error);
